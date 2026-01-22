@@ -2,8 +2,7 @@
 
 # ==============================================================================
 # sys-wiz
-# Version: 1.1.1 (Fix: Visible Error Reporting)
-# License: MIT / Fedora Project Compatible
+# Version: 1.1.1 (Added exit mode handling)
 #
 # A minimalist, safety-first terminal wizard for DNF on Fedora Linux.
 # ==============================================================================
@@ -15,6 +14,8 @@ set -o pipefail
 # --- Configuration & Constants ---
 APP_TITLE="sys-wiz"
 APP_VERSION="1.1.1"
+APP_AUTHOR="Aditya Mishra (github.com/aam-007)"
+APP_REPO="github.com/aam-007/sys-wiz"
 TEMP_FILE=$(mktemp)
 
 # Risk Levels
@@ -115,13 +116,15 @@ validate_input() {
 
 # Execute DNF Command (The Core Logic)
 # Args:
-#   $1: Description (Plain English)
-#   $2: Risk Level (INFO|NORMAL|HIGH|CRITICAL)
-#   $3...: The DNF subcommand and arguments as separate parameters
+#   $1: DNF subcommand (for display)
+#   $2: Description (Plain English)
+#   $3: Exit mode (default|signal-100-ok|...)
+#   $4...: The DNF subcommand and arguments as separate parameters
 exec_dnf() {
-    local description="$1"
-    local risk="$2"
-    shift 2
+    local subcmd="$1"
+    local description="$2"
+    local exit_mode="$3"
+    shift 3
     local dnf_args=("$@")
     
     # Construct display string safely
@@ -131,6 +134,21 @@ exec_dnf() {
     local prompt_text=""
     
     # Risk-based UI Context
+    # Determine risk level based on subcommand
+    local risk="$RISK_INFO"
+    case "$subcmd" in
+        check-update|search|provides|list|info|history|repolist|check)
+            risk="$RISK_INFO" ;;
+        install|upgrade|reinstall|module|clean)
+            risk="$RISK_NORMAL" ;;
+        remove|config-manager)
+            risk="$RISK_HIGH" ;;
+        autoremove|distro-sync|history-undo)
+            risk="$RISK_CRITICAL" ;;
+        *)
+            risk="$RISK_NORMAL" ;;
+    esac
+
     case "$risk" in
         INFO)
             title="Execute Query"
@@ -166,18 +184,19 @@ exec_dnf() {
         local ret=$?
         
         echo "----------------------------------------------------------------"
-        if [ $ret -eq 0 ]; then
-            echo "Status: COMPLETED SUCCESSFULLY"
-        else
-            echo "Status: FAILED (Exit Code: $ret)"
-
-        
-        
-        fi
+        # Handle exit code based on mode
+        case "$exit_mode:$ret" in
+            signal-100-ok:100)
+                echo "Result: UPDATES AVAILABLE"
+                ;;
+            *:0)
+                echo "Result: SUCCESS"
+                ;;
+            *)
+                echo "Result: FAILED (Exit Code: $ret)"
+                ;;
+        esac
         echo "----------------------------------------------------------------"
-        if [ $ret -eq 100 ] && [[ "$cmd_display" == "dnf check-update"* ]]; then
-            echo "Note: Exit code 100 indicates that updates are available."
-        fi
 
         echo "Press Enter to return..."
         read -r
@@ -271,12 +290,12 @@ menu_maintenance() {
             "0" "Back" 2> "$TEMP_FILE"
 
         case $(cat "$TEMP_FILE") in
-            1) exec_dnf "Checks for available updates without installing them." "$RISK_INFO" "check-update" ;;
-            2) exec_dnf "Upgrades all installed packages to the latest version." "$RISK_NORMAL" "upgrade" ;;
-            3) exec_dnf "Refreshes repository metadata, then upgrades system." "$RISK_NORMAL" "upgrade" "--refresh" ;;
-            4) exec_dnf "Checks local RPM database for broken dependencies." "$RISK_INFO" "check" ;;
-            5) exec_dnf "Removes packages no longer needed by any installed software." "$RISK_CRITICAL" "autoremove" ;;
-            6) exec_dnf "Removes all cached package data. Frees disk space but slows next update." "$RISK_HIGH" "clean" "all" ;;
+            1) exec_dnf "check-update" "Checks for available updates without installing them." "signal-100-ok" "check-update" ;;
+            2) exec_dnf "upgrade" "Upgrades all installed packages to the latest version." "default" "upgrade" ;;
+            3) exec_dnf "upgrade" "Refreshes repository metadata, then upgrades system." "default" "upgrade" "--refresh" ;;
+            4) exec_dnf "check" "Checks local RPM database for broken dependencies." "default" "check" ;;
+            5) exec_dnf "autoremove" "Removes packages no longer needed by any installed software." "default" "autoremove" ;;
+            6) exec_dnf "clean" "Removes all cached package data. Frees disk space but slows next update." "default" "clean" "all" ;;
             0|*) break ;;
         esac
     done
@@ -298,7 +317,7 @@ menu_packages() {
             1)
                 term=$(get_input_text "Search" "Enter search keyword:")
                 if validate_input "$term" "package"; then
-                    exec_dnf "Searches repository metadata." "$RISK_INFO" "search" "$term"
+                    exec_dnf "search" "Searches repository metadata." "default" "search" "$term"
                 else
                     [ -n "$term" ] && show_msg "Invalid input. Alphanumeric only."
                 fi
@@ -306,13 +325,13 @@ menu_packages() {
             2)
                 file=$(get_input_text "Identify Provider" "Enter file name or path (e.g., /usr/bin/ls):")
                 if [ -n "$file" ]; then # relaxed validation for paths/files
-                    exec_dnf "Finds which package owns the specified file." "$RISK_INFO" "provides" "$file"
+                    exec_dnf "provides" "Finds which package owns the specified file." "default" "provides" "$file"
                 fi
                 ;;
             3)
                 pkg=$(get_input_text "Install" "Enter package name:")
                 if validate_input "$pkg" "package"; then
-                    exec_dnf "Installs '$pkg' and dependencies." "$RISK_NORMAL" "install" "$pkg"
+                    exec_dnf "install" "Installs '$pkg' and dependencies." "default" "install" "$pkg"
                 elif [ -n "$pkg" ]; then
                     show_msg "Invalid package name."
                 fi
@@ -320,7 +339,7 @@ menu_packages() {
             4)
                 path=$(get_input_text "Local Install" "Enter absolute path to .rpm file:")
                 if validate_input "$path" "path"; then
-                    exec_dnf "Installs local RPM file using DNF (resolves deps)." "$RISK_NORMAL" "install" "$path"
+                    exec_dnf "install" "Installs local RPM file using DNF (resolves deps)." "default" "install" "$path"
                 elif [ -n "$path" ]; then
                     show_msg "File not found or invalid path."
                 fi
@@ -328,13 +347,13 @@ menu_packages() {
             5)
                 pkg=$(get_input_text "Remove" "Enter package name:")
                 if validate_input "$pkg" "package"; then
-                    exec_dnf "Removes '$pkg'. Review list of dependents carefully!" "$RISK_HIGH" "remove" "$pkg"
+                    exec_dnf "remove" "Removes '$pkg'. Review list of dependents carefully!" "default" "remove" "$pkg"
                 fi
                 ;;
             6)
                 pkg=$(get_input_text "Reinstall" "Enter package name:")
                 if validate_input "$pkg" "package"; then
-                    exec_dnf "Reinstalls current version of '$pkg'." "$RISK_NORMAL" "reinstall" "$pkg"
+                    exec_dnf "reinstall" "Reinstalls current version of '$pkg'." "default" "reinstall" "$pkg"
                 fi
                 ;;
             0|*) break ;;
@@ -352,18 +371,18 @@ menu_info() {
             "0" "Back" 2> "$TEMP_FILE"
 
         case $(cat "$TEMP_FILE") in
-            1) exec_dnf "Lists all installed packages." "$RISK_INFO" "list" "installed" ;;
+            1) exec_dnf "list" "Lists all installed packages." "default" "list" "installed" ;;
             2) 
                 pkg=$(get_input_text "Package Info" "Enter package name:")
                 if validate_input "$pkg" "package"; then
-                    exec_dnf "Displays metadata for '$pkg'." "$RISK_INFO" "info" "$pkg"
+                    exec_dnf "info" "Displays metadata for '$pkg'." "default" "info" "$pkg"
                 fi
                 ;;
-            3) exec_dnf "Shows summary of past DNF actions." "$RISK_INFO" "history" ;;
+            3) exec_dnf "history" "Shows summary of past DNF actions." "default" "history" ;;
             4)
                 tid=$(get_input_text "Transaction Info" "Enter Transaction ID (Integer):")
                 if [[ "$tid" =~ ^[0-9]+$ ]]; then
-                    exec_dnf "Shows full details of transaction $tid." "$RISK_INFO" "history" "info" "$tid"
+                    exec_dnf "history" "Shows full details of transaction $tid." "default" "history" "info" "$tid"
                 elif [ -n "$tid" ]; then
                     show_msg "Invalid ID. Integers only."
                 fi
@@ -390,8 +409,8 @@ menu_repos() {
             "0" "Back" 2> "$TEMP_FILE"
 
         case $(cat "$TEMP_FILE") in
-            1) exec_dnf "Lists active repositories." "$RISK_INFO" "repolist" ;;
-            2) exec_dnf "Shows details of repo configuration." "$RISK_INFO" "repolist" "-v" ;;
+            1) exec_dnf "repolist" "Lists active repositories." "default" "repolist" ;;
+            2) exec_dnf "repolist" "Shows details of repo configuration." "default" "repolist" "-v" ;;
             3)
                 # RPM Fusion Logic
                 # URL construction using rpm -E for robustness
@@ -400,19 +419,18 @@ menu_repos() {
                 local free_rpm="${base}/free/fedora/rpmfusion-free-release-${f_rel}.noarch.rpm"
                 local nonfree_rpm="${base}/nonfree/fedora/rpmfusion-nonfree-release-${f_rel}.noarch.rpm"
                 
-                exec_dnf "Installs RPM Fusion release packages.\nNote: These are third-party repositories not hosted by Fedora." \
-                    "$RISK_HIGH" "install" "$free_rpm" "$nonfree_rpm"
+                exec_dnf "install" "Installs RPM Fusion release packages.\nNote: These are third-party repositories not hosted by Fedora." "default" "install" "$free_rpm" "$nonfree_rpm"
                 ;;
             4)
                 repo=$(get_input_text "Disable Repo" "Enter Repo ID (e.g. updates-testing):")
                 if validate_input "$repo" "id"; then
-                    exec_dnf "Disables repository '$repo'." "$RISK_HIGH" "config-manager" "--set-disabled" "$repo"
+                    exec_dnf "config-manager" "Disables repository '$repo'." "default" "config-manager" "--set-disabled" "$repo"
                 fi
                 ;;
             5)
                 repo=$(get_input_text "Enable Repo" "Enter Repo ID (e.g. updates-testing):")
                 if validate_input "$repo" "id"; then
-                    exec_dnf "Enables repository '$repo'." "$RISK_HIGH" "config-manager" "--set-enabled" "$repo"
+                    exec_dnf "config-manager" "Enables repository '$repo'." "default" "config-manager" "--set-enabled" "$repo"
                 fi
                 ;;
             0|*) break ;;
@@ -430,20 +448,18 @@ menu_advanced() {
 
         case $(cat "$TEMP_FILE") in
             1) 
-                exec_dnf "Synchronizes installed packages to latest available versions.\nMay downgrade packages if newer versions are removed from repo." \
-                "$RISK_CRITICAL" "distro-sync" 
+                exec_dnf "distro-sync" "Synchronizes installed packages to latest available versions.\nMay downgrade packages if newer versions are removed from repo." "default" "distro-sync" 
                 ;;
             2)
                 tid=$(get_input_text "Undo" "Enter Transaction ID to undo:")
                 if [[ "$tid" =~ ^[0-9]+$ ]]; then
-                    exec_dnf "Attempts to revert actions of transaction $tid.\nWarning: Rollbacks are not guaranteed to be clean." \
-                    "$RISK_CRITICAL" "history" "undo" "$tid"
+                    exec_dnf "history" "Attempts to revert actions of transaction $tid.\nWarning: Rollbacks are not guaranteed to be clean." "default" "history" "undo" "$tid"
                 fi
                 ;;
             3)
                 mod=$(get_input_text "Reset Module" "Enter module name:")
                 if validate_input "$mod" "module"; then
-                    exec_dnf "Resets module stream '$mod' to default." "$RISK_HIGH" "module" "reset" "$mod"
+                    exec_dnf "module" "Resets module stream '$mod' to default." "default" "module" "reset" "$mod"
                 fi
                 ;;
             0|*) break ;;
