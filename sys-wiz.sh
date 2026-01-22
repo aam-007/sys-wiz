@@ -151,7 +151,7 @@ exec_dnf() {
         echo " intent    : $description"
         echo "----------------------------------------------------------------"
 
-        dnf "${dnf_args[@]}"
+        sudo dnf "${dnf_args[@]}"
         local ret=$?
 
         echo "----------------------------------------------------------------"
@@ -200,15 +200,31 @@ stage_privileges() {
         echo "This tool modifies system state and requires root privileges."
         echo "Restarting with sudo..."
         echo ""
-
-        exec sudo -E bash "$0" "$@" </dev/tty
-
+        
+        # Wait a moment for user to read
+        sleep 1
+        
+        # Re-execute script with sudo, preserving terminal I/O
+        if [ -t 0 ] && [ -t 1 ] && [ -t 2 ]; then
+            # We're in a terminal, use exec with proper redirection
+            exec sudo --preserve-env=PATH -E bash "$0" "$@" 0<&0 1>&1 2>&2
+        else
+            # Fallback for non-terminal environments
+            exec sudo --preserve-env=PATH -E bash "$0" "$@"
+        fi
+        
+        # If we get here, exec failed
         echo "Error: Failed to elevate privileges."
         exit 1
     fi
+    
+    # Verify sudo is still valid
+    sudo -v 2>/dev/null || {
+        echo "Error: sudo authentication failed or timed out."
+        exit 1
+    }
 }
 
-# --- Menus ---
 # --- Menus ---
 
 menu_help() {
@@ -425,7 +441,7 @@ menu_advanced() {
 
 # --- Main Logic ---
 
-stage_privileges
+stage_privileges "$@"
 stage_launch
 
 while true; do
