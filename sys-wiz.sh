@@ -5,7 +5,7 @@
 
 set -e
 SCRIPT_VERSION="1.0"
-REQUIREMENTS="dnf sudo whiptail"
+REQUIREMENTS="dnf sudo"
 
 # Detect terminal capabilities
 if [ -z "$TERM" ] || [ "$TERM" = "dumb" ]; then
@@ -19,21 +19,14 @@ if [ ! -f /etc/fedora-release ]; then
     exit 1
 fi
 
-# Source Fedora version info
-if [ -f /etc/os-release ]; then
-    . /etc/os-release
-fi
-FEDORA_VERSION="${VERSION_ID:-unknown}"
-DNF_VERSION=$(dnf --version 2>/dev/null | head -n1 | cut -d' ' -f3 || echo "unknown")
-
-# UI backend selection (prefer whiptail)
+# Check for UI tool
 if command -v whiptail >/dev/null 2>&1; then
     DIALOG=whiptail
 elif command -v dialog >/dev/null 2>&1; then
     DIALOG=dialog
 else
-    echo "Error: Please install either 'whiptail' or 'dialog' package." >&2
-    exit 1
+    # Fall back to simple text menu
+    DIALOG=none
 fi
 
 # Check for required tools
@@ -44,10 +37,30 @@ for cmd in $REQUIREMENTS; do
     fi
 done
 
+# Simple text-based menu for fallback
+simple_menu() {
+    echo ""
+    echo "$1"
+    echo "========================================"
+    shift
+    i=1
+    for item in "$@"; do
+        echo "  $i. $item"
+        i=$((i + 1))
+    done
+    echo ""
+    printf "Enter choice (1-%d): " $(($#))
+    read -r choice
+    echo "$choice"
+}
+
 # Sudo credential caching
 check_sudo() {
+    echo "This tool manages system packages and requires administrator privileges."
+    echo "Please enter your password when prompted."
+    echo ""
     if ! sudo -v; then
-        $DIALOG --msgbox "sudo authentication failed. Exiting." 8 60
+        echo "sudo authentication failed. Exiting." >&2
         exit 1
     fi
 }
@@ -56,122 +69,150 @@ check_sudo() {
 execute_dnf() {
     cmd="$1"
     explanation="$2"
-    next_suggestion="$3"
     
-    # Show command and explanation
-    $DIALOG --yesno "Command to execute:\n\n$cmd\n\n$explanation\n\nProceed?" 16 80
-    if [ $? -eq 0 ]; then
-        # Execute and capture output
-        output_file=$(mktemp)
-        if eval "sudo $cmd" >"$output_file" 2>&1; then
-            $DIALOG --scrolltext --title "Success" --msgbox "Command completed successfully.\n\nOutput:\n$(cat "$output_file")" 20 80
-        else
-            $DIALOG --scrolltext --title "Error" --msgbox "Command failed.\n\nOutput:\n$(cat "$output_file")" 20 80
-        fi
-        rm -f "$output_file"
-        
-        # Suggest next step if provided
-        if [ -n "$next_suggestion" ]; then
-            $DIALOG --msgbox "$next_suggestion" 10 60
-        fi
-    else
-        $DIALOG --msgbox "Operation cancelled." 8 50
-    fi
+    echo ""
+    echo "Command to execute:"
+    echo "  $cmd"
+    echo ""
+    echo "Explanation:"
+    echo "  $explanation"
+    echo ""
+    
+    while true; do
+        printf "Proceed? (y/n): "
+        read -r confirm
+        case "$confirm" in
+            [Yy]*)
+                echo ""
+                echo "Running command..."
+                echo "========================================"
+                if sudo $cmd; then
+                    echo "========================================"
+                    echo "Command completed successfully."
+                else
+                    echo "========================================"
+                    echo "Command failed with exit code $?."
+                fi
+                break
+                ;;
+            [Nn]*)
+                echo "Operation cancelled."
+                break
+                ;;
+            *)
+                echo "Please answer y or n."
+                ;;
+        esac
+    done
+    
+    echo ""
+    printf "Press Enter to continue..."
+    read -r
 }
 
-# Package selection dialog
+# Package selection
 select_package() {
-    title="$1"
-    action="$2"
-    packages=""
-    package_list=""
+    action="$1"
+    
+    printf "Enter package name: "
+    read -r pkgname
+    
+    if [ -z "$pkgname" ]; then
+        echo "No package name entered."
+        return 1
+    fi
     
     case "$action" in
         install)
-            $DIALOG --inputbox "Enter package name to search:" 10 60 2>/tmp/sys-wiz-search
-            if [ $? -ne 0 ]; then
-                rm -f /tmp/sys-wiz-search
-                return 1
+            echo "Searching for package: $pkgname"
+            dnf search "$pkgname" | head -20
+            echo ""
+            printf "Install package '$pkgname'? (y/n): "
+            read -r confirm
+            if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                execute_dnf "dnf install $pkgname" \
+                    "Install package $pkgname and its dependencies."
             fi
-            search_term=$(cat /tmp/sys-wiz-search)
-            rm -f /tmp/sys-wiz-search
-            
-            packages=$(dnf search "$search_term" 2>/dev/null | grep -E "^[a-zA-Z0-9_\-\.]+" | head -30 | while read -r pkg desc; do
-                echo "\"$pkg\" \"$desc\""
-            done)
-            
-            if [ -z "$packages" ]; then
-                $DIALOG --msgbox "No packages found matching '$search_term'" 8 60
-                return 1
-            fi
-            
-            eval $DIALOG --menu "Select package to install:" 20 80 13 $packages 2>/tmp/sys-wiz-pkg
             ;;
-        
         remove)
-            packages=$(dnf list installed 2>/dev/null | tail -n+2 | awk '{print $1}' | sort | while read -r pkg; do
-                echo "\"$pkg\" \"\""
-            done)
-            
-            if [ -z "$packages" ]; then
-                $DIALOG --msgbox "No installed packages found" 8 60
-                return 1
+            echo "Checking if package is installed: $pkgname"
+            if dnf list installed "$pkgname" >/dev/null 2>&1; then
+                printf "WARNING: Remove package '$pkgname'? This will also remove unused dependencies. (y/n): "
+                read -r confirm
+                if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
+                    execute_dnf "dnf remove $pkgname" \
+                        "Remove package $pkgname and unused dependencies."
+                fi
+            else
+                echo "Package '$pkgname' is not installed."
             fi
-            
-            eval $DIALOG --menu "Select package to remove:" 20 80 13 $packages 2>/tmp/sys-wiz-pkg
+            ;;
+        info)
+            execute_dnf "dnf info $pkgname" \
+                "Show detailed information about package $pkgname."
+            ;;
+        reinstall)
+            if dnf list installed "$pkgname" >/dev/null 2>&1; then
+                execute_dnf "dnf reinstall $pkgname" \
+                    "Reinstall package $pkgname with current repository versions."
+            else
+                echo "Package '$pkgname' is not installed."
+            fi
             ;;
     esac
-    
-    if [ $? -eq 0 ] && [ -s /tmp/sys-wiz-pkg ]; then
-        selected=$(cat /tmp/sys-wiz-pkg)
-        rm -f /tmp/sys-wiz-pkg
-        echo "$selected"
-    else
-        rm -f /tmp/sys-wiz-pkg
-        echo ""
-    fi
 }
 
-# Main menu functions
+# System maintenance menu
 system_maintenance() {
     while true; do
-        choice=$($DIALOG --menu "System Maintenance" 15 60 7 \
-            1 "Update system" \
-            2 "Update system (with suggested cleanup)" \
-            3 "List orphaned packages" \
-            4 "Remove orphaned packages" \
-            5 "Check dependency issues" \
-            6 "Back" \
-            2>&1)
+        if [ "$DIALOG" = "none" ]; then
+            choice=$(simple_menu "System Maintenance" \
+                "Update system" \
+                "Update system (with suggested cleanup)" \
+                "List orphaned packages" \
+                "Remove orphaned packages" \
+                "Check dependency issues" \
+                "Back")
+        else
+            choice=$($DIALOG --menu "System Maintenance" 15 60 7 \
+                1 "Update system" \
+                2 "Update system (with suggested cleanup)" \
+                3 "List orphaned packages" \
+                4 "Remove orphaned packages" \
+                5 "Check dependency issues" \
+                6 "Back" \
+                3>&1 1>&2 2>&3)
+        fi
         
         case $choice in
             1)
                 execute_dnf "dnf upgrade" \
-                    "Update all installed packages to their latest available versions." \
-                    "Consider checking for orphaned packages next."
+                    "Update all installed packages to their latest available versions."
                 ;;
             2)
                 execute_dnf "dnf upgrade --refresh" \
-                    "Update package metadata and upgrade all packages, removing unnecessary dependencies." \
-                    "You may want to check dependency issues next."
+                    "Update package metadata and upgrade all packages, removing unnecessary dependencies."
                 ;;
             3)
                 execute_dnf "dnf list extras" \
-                    "List packages that are no longer required by any installed package." \
-                    "You can remove orphaned packages if the list looks reasonable."
+                    "List packages that are no longer required by any installed package."
                 ;;
             4)
-                $DIALOG --yesno "Warning: This will remove packages not required by any installed package.\n\nReview the list first to avoid removing wanted packages.\n\nProceed to confirmation?" 12 70
-                if [ $? -eq 0 ]; then
+                echo "WARNING: This will remove packages not required by any installed package."
+                echo "Review the list first to avoid removing wanted packages."
+                echo ""
+                dnf list extras
+                echo ""
+                printf "Proceed with removing orphaned packages? (y/n): "
+                read -r confirm
+                if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                     execute_dnf "dnf autoremove" \
-                        "Remove packages that are no longer required." \
-                        "Check dependency issues to verify system health."
+                        "Remove packages that are no longer required."
                 fi
                 ;;
             5)
                 execute_dnf "dnf repoquery --unsatisfied" \
-                    "Check for dependency problems in the package database." \
-                    "If problems are found, consider reinstalling affected packages."
+                    "Check for dependency problems in the package database."
                 ;;
             6)
                 break
@@ -180,100 +221,66 @@ system_maintenance() {
     done
 }
 
+# Install & Remove menu
 install_remove() {
     while true; do
-        choice=$($DIALOG --menu "Install & Remove" 15 60 7 \
-            1 "Search and install package" \
-            2 "Remove package" \
-            3 "Reinstall package" \
-            4 "Downgrade package" \
-            5 "Back" \
-            2>&1)
+        if [ "$DIALOG" = "none" ]; then
+            choice=$(simple_menu "Install & Remove" \
+                "Search and install package" \
+                "Remove package" \
+                "Reinstall package" \
+                "Show package details" \
+                "Back")
+        else
+            choice=$($DIALOG --menu "Install & Remove" 15 60 7 \
+                1 "Search and install package" \
+                2 "Remove package" \
+                3 "Reinstall package" \
+                4 "Show package details" \
+                5 "Back" \
+                3>&1 1>&2 2>&3)
+        fi
         
         case $choice in
-            1)
-                pkg=$(select_package "Install Package" "install")
-                if [ -n "$pkg" ]; then
-                    execute_dnf "dnf install $pkg" \
-                        "Install package $pkg and its dependencies." \
-                        "Package installed. Check 'List installed packages' to verify."
-                fi
-                ;;
-            2)
-                pkg=$(select_package "Remove Package" "remove")
-                if [ -n "$pkg" ]; then
-                    $DIALOG --yesno "Warning: Removing package $pkg\n\nThis will also remove dependencies that are no longer needed.\n\nProceed?" 12 70
-                    if [ $? -eq 0 ]; then
-                        execute_dnf "dnf remove $pkg" \
-                            "Remove package $pkg and unused dependencies." \
-                            "Package removed. Consider checking for orphaned packages."
-                    fi
-                fi
-                ;;
-            3)
-                pkg=$(select_package "Reinstall Package" "remove")
-                if [ -n "$pkg" ]; then
-                    execute_dnf "dnf reinstall $pkg" \
-                        "Reinstall package $pkg with current repository versions." \
-                        "Package reinstalled."
-                fi
-                ;;
-            4)
-                $DIALOG --inputbox "Enter package name to downgrade:" 10 60 2>/tmp/sys-wiz-downgrade
-                if [ $? -eq 0 ]; then
-                    pkg=$(cat /tmp/sys-wiz-downgrade)
-                    rm -f /tmp/sys-wiz-downgrade
-                    
-                    if [ -n "$pkg" ]; then
-                        execute_dnf "dnf downgrade $pkg" \
-                            "Downgrade $pkg to an older version from repositories." \
-                            "Package downgraded. Check version with 'Show package details'."
-                    fi
-                else
-                    rm -f /tmp/sys-wiz-downgrade
-                fi
-                ;;
-            5)
-                break
-                ;;
+            1) select_package install ;;
+            2) select_package remove ;;
+            3) select_package reinstall ;;
+            4) select_package info ;;
+            5) break ;;
         esac
     done
 }
 
+# Information menu
 information() {
     while true; do
-        choice=$($DIALOG --menu "Information" 15 60 7 \
-            1 "List installed packages" \
-            2 "Show package details" \
-            3 "Show DNF history" \
-            4 "Back" \
-            2>&1)
+        if [ "$DIALOG" = "none" ]; then
+            choice=$(simple_menu "Information" \
+                "List installed packages" \
+                "Show DNF history" \
+                "List enabled repositories" \
+                "Back")
+        else
+            choice=$($DIALOG --menu "Information" 15 60 7 \
+                1 "List installed packages" \
+                2 "Show DNF history" \
+                3 "List enabled repositories" \
+                4 "Back" \
+                3>&1 1>&2 2>&3)
+        fi
         
         case $choice in
             1)
                 execute_dnf "dnf list installed" \
-                    "List all installed packages with versions." \
-                    "Use 'Show package details' for more information on specific packages."
+                    "List all installed packages with versions."
                 ;;
             2)
-                $DIALOG --inputbox "Enter package name for details:" 10 60 2>/tmp/sys-wiz-info
-                if [ $? -eq 0 ]; then
-                    pkg=$(cat /tmp/sys-wiz-info)
-                    rm -f /tmp/sys-wiz-info
-                    
-                    if [ -n "$pkg" ]; then
-                        execute_dnf "dnf info $pkg" \
-                            "Show detailed information about package $pkg." \
-                            ""
-                    fi
-                else
-                    rm -f /tmp/sys-wiz-info
-                fi
+                execute_dnf "dnf history" \
+                    "Show DNF transaction history."
                 ;;
             3)
-                execute_dnf "dnf history" \
-                    "Show DNF transaction history." \
-                    "Use 'Roll back a DNF transaction' in Advanced menu if needed."
+                execute_dnf "dnf repolist enabled" \
+                    "List all enabled DNF repositories."
                 ;;
             4)
                 break
@@ -282,53 +289,61 @@ information() {
     done
 }
 
+# Repositories menu
 repositories() {
     while true; do
-        choice=$($DIALOG --menu "Repositories" 15 60 7 \
-            1 "List enabled repositories" \
-            2 "Enable RPM Fusion (free)" \
-            3 "Enable RPM Fusion (nonfree)" \
-            4 "Disable repository" \
-            5 "Back" \
-            2>&1)
+        if [ "$DIALOG" = "none" ]; then
+            choice=$(simple_menu "Repositories" \
+                "List enabled repositories" \
+                "Enable RPM Fusion (free)" \
+                "Enable RPM Fusion (nonfree)" \
+                "Disable repository" \
+                "Back")
+        else
+            choice=$($DIALOG --menu "Repositories" 15 60 7 \
+                1 "List enabled repositories" \
+                2 "Enable RPM Fusion (free)" \
+                3 "Enable RPM Fusion (nonfree)" \
+                4 "Disable repository" \
+                5 "Back" \
+                3>&1 1>&2 2>&3)
+        fi
         
         case $choice in
             1)
                 execute_dnf "dnf repolist enabled" \
-                    "List all enabled DNF repositories." \
-                    ""
+                    "List all enabled DNF repositories."
                 ;;
             2)
-                $DIALOG --yesno "RPM Fusion provides software not included in Fedora.\n\nThis will enable the free repository.\n\nProceed?" 12 70
-                if [ $? -eq 0 ]; then
+                echo "RPM Fusion provides software not included in Fedora."
+                echo "This will enable the free repository."
+                echo ""
+                printf "Proceed? (y/n): "
+                read -r confirm
+                if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                     fedora_version=$(rpm -E %fedora 2>/dev/null || echo "unknown")
                     execute_dnf "dnf install https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-\$fedora_version.noarch.rpm" \
-                        "Enable RPM Fusion free repository for additional open-source software." \
-                        "Repository enabled. You may need to run 'dnf upgrade --refresh'."
+                        "Enable RPM Fusion free repository for additional open-source software."
                 fi
                 ;;
             3)
-                $DIALOG --yesno "RPM Fusion provides software not included in Fedora.\n\nThis will enable the nonfree repository (patents/legal restrictions).\n\nProceed?" 12 70
-                if [ $? -eq 0 ]; then
+                echo "RPM Fusion provides software not included in Fedora."
+                echo "This will enable the nonfree repository (patents/legal restrictions)."
+                echo ""
+                printf "Proceed? (y/n): "
+                read -r confirm
+                if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                     fedora_version=$(rpm -E %fedora 2>/dev/null || echo "unknown")
                     execute_dnf "dnf install https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-\$fedora_version.noarch.rpm" \
-                        "Enable RPM Fusion nonfree repository for software with usage restrictions." \
-                        "Repository enabled. You may need to run 'dnf upgrade --refresh'."
+                        "Enable RPM Fusion nonfree repository for software with usage restrictions."
                 fi
                 ;;
             4)
-                $DIALOG --inputbox "Enter repository ID to disable:" 10 60 2>/tmp/sys-wiz-repo
-                if [ $? -eq 0 ]; then
-                    repo=$(cat /tmp/sys-wiz-repo)
-                    rm -f /tmp/sys-wiz-repo
-                    
-                    if [ -n "$repo" ]; then
-                        execute_dnf "dnf config-manager --set-disabled $repo" \
-                            "Disable repository $repo." \
-                            "Repository disabled. Use 'List enabled repositories' to verify."
-                    fi
-                else
-                    rm -f /tmp/sys-wiz-repo
+                printf "Enter repository ID to disable: "
+                read -r repo
+                if [ -n "$repo" ]; then
+                    execute_dnf "dnf config-manager --set-disabled $repo" \
+                        "Disable repository $repo."
                 fi
                 ;;
             5)
@@ -338,98 +353,96 @@ repositories() {
     done
 }
 
+# Advanced menu
 advanced() {
     while true; do
-        choice=$($DIALOG --menu "Advanced / Risky Operations" 17 70 8 \
-            1 "dnf distro-sync (warning: may change many packages)" \
-            2 "Roll back a DNF transaction" \
-            3 "Reset DNF modules" \
-            4 "Clean all DNF caches" \
-            5 "Back" \
-            2>&1)
+        if [ "$DIALOG" = "none" ]; then
+            choice=$(simple_menu "Advanced / Risky Operations" \
+                "dnf distro-sync (warning: may change many packages)" \
+                "Clean all DNF caches" \
+                "Back")
+        else
+            choice=$($DIALOG --menu "Advanced / Risky Operations" 15 60 7 \
+                1 "dnf distro-sync (warning: may change many packages)" \
+                2 "Clean all DNF caches" \
+                3 "Back" \
+                3>&1 1>&2 2>&3)
+        fi
         
         case $choice in
             1)
-                $DIALOG --yesno "WARNING: distro-sync may downgrade or upgrade many packages to match the repository.\n\nThis can have significant system impact.\n\nProceed to confirmation?" 14 70
-                if [ $? -eq 0 ]; then
+                echo "WARNING: distro-sync may downgrade or upgrade many packages to match the repository."
+                echo "This can have significant system impact."
+                echo ""
+                printf "Proceed? (y/n): "
+                read -r confirm
+                if [ "$confirm" = "y" ] || [ "$confirm" = "Y" ]; then
                     execute_dnf "dnf distro-sync" \
-                        "Synchronize installed packages to the current repository versions (may downgrade)." \
-                        "Distro-sync completed. Review changes carefully."
+                        "Synchronize installed packages to the current repository versions (may downgrade)."
                 fi
                 ;;
             2)
-                $DIALOG --inputbox "Enter transaction ID to rollback (from DNF history):" 10 60 2>/tmp/sys-wiz-trans
-                if [ $? -eq 0 ]; then
-                    trans=$(cat /tmp/sys-wiz-trans)
-                    rm -f /tmp/sys-wiz-trans
-                    
-                    if [ -n "$trans" ]; then
-                        execute_dnf "dnf history rollback $trans" \
-                            "Roll back system to state before transaction $trans." \
-                            "Rollback completed. Check 'dnf history' to verify."
-                    fi
-                else
-                    rm -f /tmp/sys-wiz-trans
-                fi
+                execute_dnf "dnf clean all" \
+                    "Remove all cached package data and metadata."
                 ;;
             3)
-                $DIALOG --yesno "WARNING: This will reset all module streams to their default states.\n\nProceed?" 12 70
-                if [ $? -eq 0 ]; then
-                    execute_dnf "dnf module reset -y" \
-                        "Reset all module streams to default states." \
-                        "Modules reset. Use 'dnf module list' to see current state."
-                fi
-                ;;
-            4)
-                execute_dnf "dnf clean all" \
-                    "Remove all cached package data and metadata." \
-                    "Caches cleaned. Next DNF operation will download fresh metadata."
-                ;;
-            5)
                 break
                 ;;
         esac
     done
 }
 
-# Initialization
-clear
-cat <<EOF
+# Main initialization
+main() {
+    clear
+    cat <<EOF
 sys-wiz
 Version: $SCRIPT_VERSION
-Fedora version: $FEDORA_VERSION
-DNF version: $DNF_VERSION
+Fedora version: $(cat /etc/fedora-release 2>/dev/null || echo "unknown")
+DNF version: $(dnf --version 2>/dev/null | head -n1 | cut -d' ' -f3 || echo "unknown")
 
 A guided terminal interface for safe DNF package management.
 
 Press Enter to continue
 EOF
-read -r _
-
-# Privilege escalation
-$DIALOG --msgbox "This tool manages system packages and requires administrator privileges." 8 60
-check_sudo
-
-# Main menu loop
-while true; do
-    main_choice=$($DIALOG --menu "Main Menu" 17 60 10 \
-        1 "System Maintenance" \
-        2 "Install & Remove" \
-        3 "Information" \
-        4 "Repositories" \
-        5 "Advanced / Risky" \
-        6 "Exit" \
-        2>&1)
+    read -r _
     
-    case $main_choice in
-        1) system_maintenance ;;
-        2) install_remove ;;
-        3) information ;;
-        4) repositories ;;
-        5) advanced ;;
-        6) break ;;
-    esac
-done
+    check_sudo
+    
+    # Main menu loop
+    while true; do
+        if [ "$DIALOG" = "none" ]; then
+            choice=$(simple_menu "Main Menu" \
+                "System Maintenance" \
+                "Install & Remove" \
+                "Information" \
+                "Repositories" \
+                "Advanced / Risky" \
+                "Exit")
+        else
+            choice=$($DIALOG --menu "Main Menu" 17 60 10 \
+                1 "System Maintenance" \
+                2 "Install & Remove" \
+                3 "Information" \
+                4 "Repositories" \
+                5 "Advanced / Risky" \
+                6 "Exit" \
+                3>&1 1>&2 2>&3)
+        fi
+        
+        case $choice in
+            1) system_maintenance ;;
+            2) install_remove ;;
+            3) information ;;
+            4) repositories ;;
+            5) advanced ;;
+            6) break ;;
+        esac
+    done
+    
+    echo "Thank you for using sys-wiz."
+    echo ""
+}
 
-$DIALOG --msgbox "sys-wiz ends. Farewell." 8 40
-clear
+# Run main function
+main
