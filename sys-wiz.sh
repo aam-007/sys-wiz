@@ -1,18 +1,11 @@
-#!/usr/bin/bash
+#!/bin/bash
 
 # ==============================================================================
 # sys-wiz
-# Version: 1.1.0 (Fedora Hardened)
+# Version: 1.1.1 (Fix: Visible Error Reporting)
 # License: MIT / Fedora Project Compatible
 #
 # A minimalist, safety-first terminal wizard for DNF on Fedora Linux.
-# Designed for transparency, reversibility, and maintainability.
-#
-# Design Principles:
-# 1. Zero Magic: No hidden flags, no silent chaining.
-# 2. Transparency: User sees the exact command before execution.
-# 3. Fedora Native: Strict OS and dependency detection.
-# 4. Input Safety: Strict validation of all user input.
 # ==============================================================================
 
 # --- Safety Flags ---
@@ -21,15 +14,14 @@ set -o pipefail
 
 # --- Configuration & Constants ---
 APP_TITLE="sys-wiz"
-APP_VERSION="1.1.0"
+APP_VERSION="1.1.1"
 TEMP_FILE=$(mktemp)
-LOG_FILE=$(mktemp)
 
 # Risk Levels
 RISK_INFO="INFO"       # Read-only
 RISK_NORMAL="NORMAL"   # Standard install/update
 RISK_HIGH="HIGH"       # Removal, Repository changes
-RISK_CRITICAL="CRITICAL" # Distro-sync, History Undo, Autoremove
+RISK_CRITICAL="CRITICAL" # Distro-sync, History Undo
 
 # UI Defaults (Conservative defaults for 80x24 terminals)
 H=18
@@ -38,8 +30,9 @@ M=10 # Menu height
 
 # --- Trap Cleanup ---
 cleanup() {
-    rm -f "$TEMP_FILE" "$LOG_FILE"
-    clear
+    # Removes temp files but DOES NOT clear screen
+    # This ensures error messages remain visible if the script crashes.
+    rm -f "$TEMP_FILE"
 }
 trap cleanup EXIT SIGINT SIGTERM
 
@@ -53,7 +46,7 @@ elif command -v dialog >/dev/null; then
 else
     echo "Error: Missing dependency."
     echo "This tool requires 'newt' (whiptail) or 'dialog'."
-    echo "Install: sudo dnf install newt"
+    echo "To fix, run: sudo dnf install newt"
     exit 1
 fi
 
@@ -63,7 +56,7 @@ if [ -f /etc/os-release ]; then
     . /etc/os-release
     if [ "${ID:-}" != "fedora" ]; then
         echo "Error: Detected OS is '${ID:-unknown}'."
-        echo "sys-wiz is designed strictly for Fedora Linux to ensure safety."
+        echo "sys-wiz is designed strictly for Fedora Linux."
         exit 1
     fi
     FEDORA_VERSION="${VERSION_ID:-}"
@@ -177,8 +170,15 @@ exec_dnf() {
             echo "Status: COMPLETED SUCCESSFULLY"
         else
             echo "Status: FAILED (Exit Code: $ret)"
+
+        
+        
         fi
         echo "----------------------------------------------------------------"
+        if [ $ret -eq 100 ] && [[ "$cmd_display" == "dnf check-update"* ]]; then
+            echo "Note: Exit code 100 indicates that updates are available."
+        fi
+
         echo "Press Enter to return..."
         read -r
     else
