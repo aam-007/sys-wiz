@@ -1,6 +1,11 @@
+#!/bin/sh
+# sys-wiz - A guided terminal interface for safe DNF package management
+# SPDX-License-Identifier: MIT
+# Copyright (C) 2024 Fedora Project contributors
+
 set -e
-readonly SCRIPT_VERSION="1.0"
-readonly REQUIREMENTS="dnf sudo whiptail"
+SCRIPT_VERSION="1.0"
+REQUIREMENTS="dnf sudo whiptail"
 
 # Detect terminal capabilities
 if [ -z "$TERM" ] || [ "$TERM" = "dumb" ]; then
@@ -15,7 +20,9 @@ if [ ! -f /etc/fedora-release ]; then
 fi
 
 # Source Fedora version info
-. /etc/os-release 2>/dev/null || VERSION_ID="unknown"
+if [ -f /etc/os-release ]; then
+    . /etc/os-release
+fi
 FEDORA_VERSION="${VERSION_ID:-unknown}"
 DNF_VERSION=$(dnf --version 2>/dev/null | head -n1 | cut -d' ' -f3 || echo "unknown")
 
@@ -47,15 +54,14 @@ check_sudo() {
 
 # Safe command execution with explanation
 execute_dnf() {
-    local cmd="$1"
-    local explanation="$2"
-    local next_suggestion="$3"
+    cmd="$1"
+    explanation="$2"
+    next_suggestion="$3"
     
     # Show command and explanation
     $DIALOG --yesno "Command to execute:\n\n$cmd\n\n$explanation\n\nProceed?" 16 80
     if [ $? -eq 0 ]; then
         # Execute and capture output
-        local output_file
         output_file=$(mktemp)
         if eval "sudo $cmd" >"$output_file" 2>&1; then
             $DIALOG --scrolltext --title "Success" --msgbox "Command completed successfully.\n\nOutput:\n$(cat "$output_file")" 20 80
@@ -75,22 +81,30 @@ execute_dnf() {
 
 # Package selection dialog
 select_package() {
-    local title="$1"
-    local action="$2"
-    local packages
-    local package_list=""
+    title="$1"
+    action="$2"
+    packages=""
+    package_list=""
     
     case "$action" in
         install)
             $DIALOG --inputbox "Enter package name to search:" 10 60 2>/tmp/sys-wiz-search
-            [ $? -ne 0 ] && return 1
-            local search_term
+            if [ $? -ne 0 ]; then
+                rm -f /tmp/sys-wiz-search
+                return 1
+            fi
             search_term=$(cat /tmp/sys-wiz-search)
             rm -f /tmp/sys-wiz-search
             
             packages=$(dnf search "$search_term" 2>/dev/null | grep -E "^[a-zA-Z0-9_\-\.]+" | head -30 | while read -r pkg desc; do
                 echo "\"$pkg\" \"$desc\""
             done)
+            
+            if [ -z "$packages" ]; then
+                $DIALOG --msgbox "No packages found matching '$search_term'" 8 60
+                return 1
+            fi
+            
             eval $DIALOG --menu "Select package to install:" 20 80 13 $packages 2>/tmp/sys-wiz-pkg
             ;;
         
@@ -98,12 +112,17 @@ select_package() {
             packages=$(dnf list installed 2>/dev/null | tail -n+2 | awk '{print $1}' | sort | while read -r pkg; do
                 echo "\"$pkg\" \"\""
             done)
+            
+            if [ -z "$packages" ]; then
+                $DIALOG --msgbox "No installed packages found" 8 60
+                return 1
+            fi
+            
             eval $DIALOG --menu "Select package to remove:" 20 80 13 $packages 2>/tmp/sys-wiz-pkg
             ;;
     esac
     
     if [ $? -eq 0 ] && [ -s /tmp/sys-wiz-pkg ]; then
-        local selected
         selected=$(cat /tmp/sys-wiz-pkg)
         rm -f /tmp/sys-wiz-pkg
         echo "$selected"
@@ -116,7 +135,6 @@ select_package() {
 # Main menu functions
 system_maintenance() {
     while true; do
-        local choice
         choice=$($DIALOG --menu "System Maintenance" 15 60 7 \
             1 "Update system" \
             2 "Update system (with suggested cleanup)" \
@@ -164,7 +182,6 @@ system_maintenance() {
 
 install_remove() {
     while true; do
-        local choice
         choice=$($DIALOG --menu "Install & Remove" 15 60 7 \
             1 "Search and install package" \
             2 "Remove package" \
@@ -175,7 +192,6 @@ install_remove() {
         
         case $choice in
             1)
-                local pkg
                 pkg=$(select_package "Install Package" "install")
                 if [ -n "$pkg" ]; then
                     execute_dnf "dnf install $pkg" \
@@ -184,7 +200,6 @@ install_remove() {
                 fi
                 ;;
             2)
-                local pkg
                 pkg=$(select_package "Remove Package" "remove")
                 if [ -n "$pkg" ]; then
                     $DIALOG --yesno "Warning: Removing package $pkg\n\nThis will also remove dependencies that are no longer needed.\n\nProceed?" 12 70
@@ -196,7 +211,6 @@ install_remove() {
                 fi
                 ;;
             3)
-                local pkg
                 pkg=$(select_package "Reinstall Package" "remove")
                 if [ -n "$pkg" ]; then
                     execute_dnf "dnf reinstall $pkg" \
@@ -207,7 +221,6 @@ install_remove() {
             4)
                 $DIALOG --inputbox "Enter package name to downgrade:" 10 60 2>/tmp/sys-wiz-downgrade
                 if [ $? -eq 0 ]; then
-                    local pkg
                     pkg=$(cat /tmp/sys-wiz-downgrade)
                     rm -f /tmp/sys-wiz-downgrade
                     
@@ -229,7 +242,6 @@ install_remove() {
 
 information() {
     while true; do
-        local choice
         choice=$($DIALOG --menu "Information" 15 60 7 \
             1 "List installed packages" \
             2 "Show package details" \
@@ -246,7 +258,6 @@ information() {
             2)
                 $DIALOG --inputbox "Enter package name for details:" 10 60 2>/tmp/sys-wiz-info
                 if [ $? -eq 0 ]; then
-                    local pkg
                     pkg=$(cat /tmp/sys-wiz-info)
                     rm -f /tmp/sys-wiz-info
                     
@@ -273,7 +284,6 @@ information() {
 
 repositories() {
     while true; do
-        local choice
         choice=$($DIALOG --menu "Repositories" 15 60 7 \
             1 "List enabled repositories" \
             2 "Enable RPM Fusion (free)" \
@@ -291,7 +301,8 @@ repositories() {
             2)
                 $DIALOG --yesno "RPM Fusion provides software not included in Fedora.\n\nThis will enable the free repository.\n\nProceed?" 12 70
                 if [ $? -eq 0 ]; then
-                    execute_dnf "dnf install https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-\$(rpm -E %fedora).noarch.rpm" \
+                    fedora_version=$(rpm -E %fedora 2>/dev/null || echo "unknown")
+                    execute_dnf "dnf install https://download1.rpmfusion.org/free/fedora/rpmfusion-free-release-\$fedora_version.noarch.rpm" \
                         "Enable RPM Fusion free repository for additional open-source software." \
                         "Repository enabled. You may need to run 'dnf upgrade --refresh'."
                 fi
@@ -299,7 +310,8 @@ repositories() {
             3)
                 $DIALOG --yesno "RPM Fusion provides software not included in Fedora.\n\nThis will enable the nonfree repository (patents/legal restrictions).\n\nProceed?" 12 70
                 if [ $? -eq 0 ]; then
-                    execute_dnf "dnf install https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-\$(rpm -E %fedora).noarch.rpm" \
+                    fedora_version=$(rpm -E %fedora 2>/dev/null || echo "unknown")
+                    execute_dnf "dnf install https://download1.rpmfusion.org/nonfree/fedora/rpmfusion-nonfree-release-\$fedora_version.noarch.rpm" \
                         "Enable RPM Fusion nonfree repository for software with usage restrictions." \
                         "Repository enabled. You may need to run 'dnf upgrade --refresh'."
                 fi
@@ -307,7 +319,6 @@ repositories() {
             4)
                 $DIALOG --inputbox "Enter repository ID to disable:" 10 60 2>/tmp/sys-wiz-repo
                 if [ $? -eq 0 ]; then
-                    local repo
                     repo=$(cat /tmp/sys-wiz-repo)
                     rm -f /tmp/sys-wiz-repo
                     
@@ -329,7 +340,6 @@ repositories() {
 
 advanced() {
     while true; do
-        local choice
         choice=$($DIALOG --menu "Advanced / Risky Operations" 17 70 8 \
             1 "dnf distro-sync (warning: may change many packages)" \
             2 "Roll back a DNF transaction" \
@@ -350,7 +360,6 @@ advanced() {
             2)
                 $DIALOG --inputbox "Enter transaction ID to rollback (from DNF history):" 10 60 2>/tmp/sys-wiz-trans
                 if [ $? -eq 0 ]; then
-                    local trans
                     trans=$(cat /tmp/sys-wiz-trans)
                     rm -f /tmp/sys-wiz-trans
                     
@@ -403,7 +412,6 @@ check_sudo
 
 # Main menu loop
 while true; do
-    local main_choice
     main_choice=$($DIALOG --menu "Main Menu" 17 60 10 \
         1 "System Maintenance" \
         2 "Install & Remove" \
@@ -423,5 +431,5 @@ while true; do
     esac
 done
 
-$DIALOG --msgbox "Thank you for using sys-wiz." 8 40
+$DIALOG --msgbox "sys-wiz ends. Farewell." 8 40
 clear
