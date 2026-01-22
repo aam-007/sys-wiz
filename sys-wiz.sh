@@ -31,15 +31,12 @@ M=10 # Menu height
 
 # --- Trap Cleanup ---
 cleanup() {
-    # Removes temp files but DOES NOT clear screen
-    # This ensures error messages remain visible if the script crashes.
     rm -f "$TEMP_FILE"
 }
 trap cleanup EXIT SIGINT SIGTERM
 
 # --- Dependency & Environment Checks ---
 
-# 1. Detect UI Provider
 if command -v whiptail >/dev/null; then
     UI_BIN="whiptail"
 elif command -v dialog >/dev/null; then
@@ -51,9 +48,7 @@ else
     exit 1
 fi
 
-# 2. Detect Fedora
 if [ -f /etc/os-release ]; then
-    # shellcheck source=/dev/null
     . /etc/os-release
     if [ "${ID:-}" != "fedora" ]; then
         echo "Error: Detected OS is '${ID:-unknown}'."
@@ -66,14 +61,12 @@ else
     exit 1
 fi
 
-# 3. Detect DNF
 if ! command -v dnf >/dev/null; then
     echo "Error: 'dnf' binary not found."
     exit 1
 fi
 DNF_VERSION=$(dnf --version | head -n 1 | awk '{print $1 " " $2}')
 
-# 4. Detect DNF Plugins (Required for repo management)
 HAS_PLUGINS=0
 if rpm -q dnf-plugins-core >/dev/null 2>&1; then
     HAS_PLUGINS=1
@@ -81,14 +74,10 @@ fi
 
 # --- Helper Functions ---
 
-# Standard message box
 show_msg() {
     $UI_BIN --title "$APP_TITLE" --msgbox "$1" 10 60
 }
 
-# Input Validator
-# Returns 0 if valid, 1 if invalid
-# Args: $1=Input String, $2=Type (package|id|path)
 validate_input() {
     local input="$1"
     local type="$2"
@@ -97,16 +86,13 @@ validate_input() {
 
     case "$type" in
         package|module)
-            # Alphanumeric, plus -, _, ., +, : (for epochs)
-            if [[ "$input" =~ ^[a-zA-Z0-9\.\_\+\:\-]+$ ]]; then return 0; else return 1; fi
+            [[ "$input" =~ ^[a-zA-Z0-9._+:-]+$ ]]
             ;;
         id)
-            # Repos usually just alpha-numeric and dashes/underscores
-            if [[ "$input" =~ ^[a-zA-Z0-9\.\_\-]+$ ]]; then return 0; else return 1; fi
+            [[ "$input" =~ ^[a-zA-Z0-9._-]+$ ]]
             ;;
         path)
-            # Local file path validation
-            if [ -f "$input" ]; then return 0; else return 1; fi
+            [ -f "$input" ]
             ;;
         *)
             return 1
@@ -114,28 +100,16 @@ validate_input() {
     esac
 }
 
-# Execute DNF Command (The Core Logic)
-# Args:
-#   $1: DNF subcommand (for display)
-#   $2: Description (Plain English)
-#   $3: Exit mode (default|signal-100-ok|...)
-#   $4...: The DNF subcommand and arguments as separate parameters
 exec_dnf() {
     local subcmd="$1"
     local description="$2"
     local exit_mode="$3"
     shift 3
     local dnf_args=("$@")
-    
-    # Construct display string safely
-    local cmd_display="dnf ${dnf_args[*]}"
 
-    local title="Confirm Action"
-    local prompt_text=""
-    
-    # Risk-based UI Context
-    # Determine risk level based on subcommand
+    local cmd_display="dnf ${dnf_args[*]}"
     local risk="$RISK_INFO"
+
     case "$subcmd" in
         check-update|search|provides|list|info|history|repolist|check)
             risk="$RISK_INFO" ;;
@@ -149,6 +123,7 @@ exec_dnf() {
             risk="$RISK_NORMAL" ;;
     esac
 
+    local title prompt_text
     case "$risk" in
         INFO)
             title="Execute Query"
@@ -169,59 +144,38 @@ exec_dnf() {
     esac
 
     if $UI_BIN --title "$title" --defaultno --yesno "$prompt_text" 16 74; then
-        
-        # Execution Phase
         clear
         echo "----------------------------------------------------------------"
         echo " timestamp : $(date '+%Y-%m-%d %H:%M:%S')"
         echo " command   : dnf ${dnf_args[*]}"
         echo " intent    : $description"
         echo "----------------------------------------------------------------"
-        
-        # Run DNF (As Root)
-        # We are already root because of stage_privileges, so no 'sudo' prefix needed here.
+
         dnf "${dnf_args[@]}"
         local ret=$?
-        
+
         echo "----------------------------------------------------------------"
-        # Handle exit code based on mode
         case "$exit_mode:$ret" in
-            signal-100-ok:100)
-                echo "Result: UPDATES AVAILABLE"
-                ;;
-            *:0)
-                echo "Result: SUCCESS"
-                ;;
-            *)
-                echo "Result: FAILED (Exit Code: $ret)"
-                ;;
+            signal-100-ok:100) echo "Result: UPDATES AVAILABLE" ;;
+            *:0) echo "Result: SUCCESS" ;;
+            *) echo "Result: FAILED (Exit Code: $ret)" ;;
         esac
         echo "----------------------------------------------------------------"
-
-        echo "Press Enter to return..."
         read -r
     else
         show_msg "Action cancelled."
     fi
 }
 
-# Get Input Helper
 get_input_text() {
-    local title="$1"
-    local text="$2"
-    $UI_BIN --title "$title" --inputbox "$text" 10 60 2> "$TEMP_FILE"
-    if [ $? -eq 0 ]; then
-        cat "$TEMP_FILE"
-    else
-        echo ""
-    fi
+    $UI_BIN --title "$1" --inputbox "$2" 10 60 2> "$TEMP_FILE"
+    [ $? -eq 0 ] && cat "$TEMP_FILE" || echo ""
 }
 
 # --- Functional Stages ---
 
 stage_launch() {
     clear
-    # Simple, boring header
     echo "sys-wiz v$APP_VERSION"
     echo "Author: $APP_AUTHOR"
     echo "Repo: $APP_REPO"
@@ -230,19 +184,15 @@ stage_launch() {
     echo "----------------------------------------"
     echo "Guided, transparent DNF package manager."
     echo ""
-    
     if [ "$HAS_PLUGINS" -eq 0 ]; then
         echo "WARNING: 'dnf-plugins-core' is missing."
         echo "          Repository management features will be disabled."
         echo ""
     fi
-
-    echo "Press Enter to start..."
     read -r
 }
 
 stage_privileges() {
-    # Check if we are root. If not, restart the script with sudo.
     if [ "$(id -u)" -ne 0 ]; then
         clear
         echo "Authorization Required"
@@ -250,16 +200,15 @@ stage_privileges() {
         echo "This tool modifies system state and requires root privileges."
         echo "Restarting with sudo..."
         echo ""
-        
-        # Re-execute the script as root, preserving arguments
-        exec sudo "$0" "$@"
-        
-        # If exec fails (e.g. user cancels password prompt), we exit.
+
+        exec sudo -E bash "$0" "$@" </dev/tty
+
         echo "Error: Failed to elevate privileges."
         exit 1
     fi
 }
 
+# --- Menus ---
 # --- Menus ---
 
 menu_help() {
@@ -473,14 +422,12 @@ menu_advanced() {
     done
 }
 
+
 # --- Main Logic ---
 
-# Check privileges BEFORE launching the UI
 stage_privileges
-# Launch UI
 stage_launch
 
-# Main Loop
 while true; do
     $UI_BIN --title "$APP_TITLE Main Menu" --menu "Select Category:" $H $W 7 \
         "1" "System Health & Maintenance" \
@@ -489,11 +436,7 @@ while true; do
         "4" "Repository Management" \
         "5" "Advanced / Risky Operations" \
         "H" "Help" \
-        "0" "Exit" 2> "$TEMP_FILE"
-
-    if [ $? -ne 0 ]; then
-        break
-    fi
+        "0" "Exit" 2> "$TEMP_FILE" || break
 
     case $(cat "$TEMP_FILE") in
         1) menu_maintenance ;;
@@ -506,13 +449,8 @@ while true; do
     esac
 done
 
-# Exit Summary
 clear
 echo "========================================"
 echo " sys-wiz session ended"
-echo "========================================"
-echo " No background processes were left running."
-echo " Temporary files have been cleaned up."
-echo " Stay safe."
 echo "========================================"
 exit 0
