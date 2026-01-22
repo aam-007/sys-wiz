@@ -85,10 +85,10 @@ class MainMenu(Screen):
         for key, value in self.current_menu.items():
             if isinstance(value, dict):
                 # It's a category
-                list_view.append(ListItem(Label(f"📂 {key}"), id=key))
+                list_view.append(ListItem(Label(f"{key}"), id=key))
             elif isinstance(value, DnfCommand):
                 # It's a command
-                icon = "⚠️ " if value.risky else "🔧 "
+                icon = "X" if value.risky else "√"
                 list_view.append(ListItem(Label(f"{icon} {value.title}"), id=key))
 
         title = " > ".join(["Home"] + self.breadcrumbs)
