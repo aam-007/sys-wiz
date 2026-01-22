@@ -2,12 +2,11 @@
 
 # ==============================================================================
 # sys-wiz
-# Version: 1.1.2 (Fixed sudo handling via Auto-Elevation)
-#
+# Version: 1.1.1
 # A minimalist, safety-first terminal wizard for DNF on Fedora Linux.
 # ==============================================================================
 
-# --- Auto-Elevation (Must be first) ---
+
 # Ensure the script runs as root from the very start.
 # If not root, it asks for password once and restarts itself.
 if [ "$(id -u)" -ne 0 ]; then
