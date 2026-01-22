@@ -1,0 +1,8 @@
+[project]
+name = "sys-wiz"
+version = "0.1.0"
+description = "Transparent, guided DNF wizard for Fedora."
+requires-python = ">=3.11"
+dependencies = [
+    "textual>=0.40.0",
+]
