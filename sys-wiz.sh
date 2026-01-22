@@ -223,6 +223,9 @@ stage_launch() {
     clear
     # Simple, boring header
     echo "sys-wiz v$APP_VERSION"
+    echo "Author: $APP_AUTHOR"
+    echo "Repo: $APP_REPO"
+    echo "========================================"
     echo "Fedora $FEDORA_VERSION | $DNF_VERSION"
     echo "----------------------------------------"
     echo "Guided, transparent DNF package manager."
