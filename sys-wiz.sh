@@ -1,8 +1,4 @@
 #!/bin/sh
-# sys-wiz - A guided terminal interface for safe DNF package management
-# SPDX-License-Identifier: MIT
-# Copyright (C) 2024 Fedora Project contributors
-
 set -e
 SCRIPT_VERSION="1.0"
 REQUIREMENTS="dnf sudo"
