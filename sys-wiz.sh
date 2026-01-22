@@ -2,18 +2,28 @@
 
 # ==============================================================================
 # sys-wiz
-# Version: 1.1.1 (Added exit mode handling)
+# Version: 1.1.2 (Fixed sudo handling via Auto-Elevation)
 #
 # A minimalist, safety-first terminal wizard for DNF on Fedora Linux.
 # ==============================================================================
+
+# --- Auto-Elevation (Must be first) ---
+# Ensure the script runs as root from the very start.
+# If not root, it asks for password once and restarts itself.
+if [ "$(id -u)" -ne 0 ]; then
+    echo "sys-wiz requires root privileges to manage packages."
+    echo "Attempting to elevate privileges..."
+    exec sudo bash "$0" "$@"
+    exit
+fi
 
 # --- Safety Flags ---
 set -u
 set -o pipefail
 
 # --- Configuration & Constants ---
-APP_TITLE="sys-wiz"
-APP_VERSION="1.1.1"
+APP_TITLE="sys-wiz (Root)"
+APP_VERSION="1.1.2"
 APP_AUTHOR="Aditya Mishra (github.com/aam-007)"
 APP_REPO="github.com/aam-007/sys-wiz"
 TEMP_FILE=$(mktemp)
@@ -31,8 +41,6 @@ M=10 # Menu height
 
 # --- Trap Cleanup ---
 cleanup() {
-    # Removes temp files but DOES NOT clear screen
-    # This ensures error messages remain visible if the script crashes.
     rm -f "$TEMP_FILE"
 }
 trap cleanup EXIT SIGINT SIGTERM
@@ -47,7 +55,7 @@ elif command -v dialog >/dev/null; then
 else
     echo "Error: Missing dependency."
     echo "This tool requires 'newt' (whiptail) or 'dialog'."
-    echo "To fix, run: sudo dnf install newt"
+    echo "To fix, run: dnf install newt"
     exit 1
 fi
 
@@ -87,8 +95,6 @@ show_msg() {
 }
 
 # Input Validator
-# Returns 0 if valid, 1 if invalid
-# Args: $1=Input String, $2=Type (package|id|path)
 validate_input() {
     local input="$1"
     local type="$2"
@@ -97,15 +103,12 @@ validate_input() {
 
     case "$type" in
         package|module)
-            # Alphanumeric, plus -, _, ., +, : (for epochs)
             if [[ "$input" =~ ^[a-zA-Z0-9\.\_\+\:\-]+$ ]]; then return 0; else return 1; fi
             ;;
         id)
-            # Repos usually just alpha-numeric and dashes/underscores
             if [[ "$input" =~ ^[a-zA-Z0-9\.\_\-]+$ ]]; then return 0; else return 1; fi
             ;;
         path)
-            # Local file path validation
             if [ -f "$input" ]; then return 0; else return 1; fi
             ;;
         *)
@@ -115,11 +118,6 @@ validate_input() {
 }
 
 # Execute DNF Command (The Core Logic)
-# Args:
-#   $1: DNF subcommand (for display)
-#   $2: Description (Plain English)
-#   $3: Exit mode (default|signal-100-ok|...)
-#   $4...: The DNF subcommand and arguments as separate parameters
 exec_dnf() {
     local subcmd="$1"
     local description="$2"
@@ -127,14 +125,10 @@ exec_dnf() {
     shift 3
     local dnf_args=("$@")
     
-    # Construct display string safely
     local cmd_display="dnf ${dnf_args[*]}"
-
     local title="Confirm Action"
     local prompt_text=""
     
-    # Risk-based UI Context
-    # Determine risk level based on subcommand
     local risk="$RISK_INFO"
     case "$subcmd" in
         check-update|search|provides|list|info|history|repolist|check)
@@ -178,9 +172,8 @@ exec_dnf() {
         echo " intent    : $description"
         echo "----------------------------------------------------------------"
         
-        # Run Sudo DNF
-        # effectively using quotes to handle arguments correctly
-        sudo dnf "${dnf_args[@]}"
+        # Run DNF directly (We are already root)
+        dnf "${dnf_args[@]}"
         local ret=$?
         
         echo "----------------------------------------------------------------"
@@ -221,12 +214,12 @@ get_input_text() {
 
 stage_launch() {
     clear
-    # Simple, boring header
     echo "sys-wiz v$APP_VERSION"
     echo "Author: $APP_AUTHOR"
     echo "Repo: $APP_REPO"
     echo "========================================"
     echo "Fedora $FEDORA_VERSION | $DNF_VERSION"
+    echo "User: $(whoami) (Privileged)"
     echo "----------------------------------------"
     echo "Guided, transparent DNF package manager."
     echo ""
@@ -239,22 +232,6 @@ stage_launch() {
 
     echo "Press Enter to start..."
     read -r
-}
-
-stage_privileges() {
-    if [ "$(id -u)" -ne 0 ]; then
-        clear
-        echo "Authorization Required"
-        echo "----------------------"
-        echo "This tool modifies system state."
-        echo "Please enter your sudo password."
-        echo ""
-        if ! sudo -v; then
-            echo ""
-            echo "Authentication failed. Aborting."
-            exit 1
-        fi
-    fi
 }
 
 # --- Menus ---
@@ -274,9 +251,7 @@ Risk Levels:
 Controls:
 Arrow Keys - Navigate
 Enter      - Select
-Esc        - Back/Cancel
-
-No actions are taken without your explicit confirmation."
+Esc        - Back/Cancel"
 
     $UI_BIN --title "Help" --msgbox "$help_text" 20 70
 }
@@ -327,7 +302,7 @@ menu_packages() {
                 ;;
             2)
                 file=$(get_input_text "Identify Provider" "Enter file name or path (e.g., /usr/bin/ls):")
-                if [ -n "$file" ]; then # relaxed validation for paths/files
+                if [ -n "$file" ]; then
                     exec_dnf "provides" "Finds which package owns the specified file." "default" "provides" "$file"
                 fi
                 ;;
@@ -396,7 +371,6 @@ menu_info() {
 }
 
 menu_repos() {
-    # Check dependency
     if [ "$HAS_PLUGINS" -eq 0 ]; then
         show_msg "Error: 'dnf-plugins-core' is missing.\nCannot manage repositories."
         return
@@ -415,14 +389,11 @@ menu_repos() {
             1) exec_dnf "repolist" "Lists active repositories." "default" "repolist" ;;
             2) exec_dnf "repolist" "Shows details of repo configuration." "default" "repolist" "-v" ;;
             3)
-                # RPM Fusion Logic
-                # URL construction using rpm -E for robustness
                 local base="https://mirrors.rpmfusion.org"
                 local f_rel=$(rpm -E %fedora)
                 local free_rpm="${base}/free/fedora/rpmfusion-free-release-${f_rel}.noarch.rpm"
                 local nonfree_rpm="${base}/nonfree/fedora/rpmfusion-nonfree-release-${f_rel}.noarch.rpm"
-                
-                exec_dnf "install" "Installs RPM Fusion release packages.\nNote: These are third-party repositories not hosted by Fedora." "default" "install" "$free_rpm" "$nonfree_rpm"
+                exec_dnf "install" "Installs RPM Fusion release packages." "default" "install" "$free_rpm" "$nonfree_rpm"
                 ;;
             4)
                 repo=$(get_input_text "Disable Repo" "Enter Repo ID (e.g. updates-testing):")
@@ -451,12 +422,12 @@ menu_advanced() {
 
         case $(cat "$TEMP_FILE") in
             1) 
-                exec_dnf "distro-sync" "Synchronizes installed packages to latest available versions.\nMay downgrade packages if newer versions are removed from repo." "default" "distro-sync" 
+                exec_dnf "distro-sync" "Synchronizes installed packages to latest available versions." "default" "distro-sync" 
                 ;;
             2)
                 tid=$(get_input_text "Undo" "Enter Transaction ID to undo:")
                 if [[ "$tid" =~ ^[0-9]+$ ]]; then
-                    exec_dnf "history" "Attempts to revert actions of transaction $tid.\nWarning: Rollbacks are not guaranteed to be clean." "default" "history" "undo" "$tid"
+                    exec_dnf "history" "Attempts to revert actions of transaction $tid." "default" "history" "undo" "$tid"
                 fi
                 ;;
             3)
@@ -473,7 +444,6 @@ menu_advanced() {
 # --- Main Logic ---
 
 stage_launch
-stage_privileges
 
 # Main Loop
 while true; do
@@ -505,9 +475,5 @@ done
 clear
 echo "========================================"
 echo " sys-wiz session ended"
-echo "========================================"
-echo " No background processes were left running."
-echo " Temporary files have been cleaned up."
-echo " Stay safe."
 echo "========================================"
 exit 0
