@@ -1,21 +1,4 @@
 #!/bin/sh
-# =============================================================================
-#  sys-wiz — Fedora DNF Package Manager TUI
-#  Version: 2.0
-#  License: MIT
-# =============================================================================
-# DESIGN GOALS:
-#   - POSIX sh only (no bashisms), works on busybox ash and dash
-#   - Zero external runtime dependencies beyond dnf, sudo, and coreutils
-#   - Full colour + spinner feedback; degrades gracefully on dumb terminals
-#   - Dry-run mode: every destructive command can be previewed first
-#   - Structured logging to ~/.local/share/sys-wiz/sys-wiz.log
-#   - History: all executed commands appended to history file
-#   - Plugin drop-in: source any *.plugin file from ~/.config/sys-wiz/plugins/
-#   - Configurable via ~/.config/sys-wiz/sys-wiz.conf
-#   - Rollback: remember last N DNF transaction IDs for undo
-#   - Signal-safe: traps SIGINT/SIGTERM and cleans up properly
-# =============================================================================
 
 set -e
 
